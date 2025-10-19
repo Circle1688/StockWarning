@@ -408,7 +408,7 @@ class WarningClient(object):
         # 尾盘检查
         scheduler.add_job(self.stock_warning, args=[True], trigger='cron', day_of_week='mon-fri', hour=14, minute='50')
 
-        scheduler.add_job(self.stock_warning, args=[False], trigger=IntervalTrigger(minutes=1), next_run_time=datetime.now())
+        # scheduler.add_job(self.stock_warning, args=[False], trigger=IntervalTrigger(minutes=1), next_run_time=datetime.now())
 
         try:
             # 启动调度器
