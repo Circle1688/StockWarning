@@ -29,6 +29,7 @@ class StockSignal(object):
 
 class WarningClient(object):
     def __init__(self, stock_db: str, tdx_folder: str):
+        self.trade_date_df = None
         self.stock_push = {}
         self.logger = setup_default_logger('WarningClient')
         self.webhook = None
@@ -60,6 +61,9 @@ class WarningClient(object):
             cursor.execute(create_table_query)
             conn.commit()
         conn.close()
+
+    def is_trade_day(self, date):
+        return date in self.trade_date_df.values
 
     def load_stocks_tdx(self):
         # 读取通达信自选股文件
@@ -339,6 +343,13 @@ class WarningClient(object):
             self.logger.error(e)
 
     def stock_warning(self, at_close=False):
+        current_date = datetime.now()
+
+        # 非交易日不运行
+        if not self.is_trade_day(current_date):
+            self.logger.info('今日休息')
+            return
+
         stocks = self.load_stocks_tdx()
 
         self.logger.info('分析通达信自选股')
@@ -371,10 +382,16 @@ class WarningClient(object):
             # 尾盘清空记录
             self.stock_push = {}
 
+    def get_trade_date(self):
+        trade_date_df = ak.tool_trade_date_hist_sina()
+        self.trade_date_df = pd.to_datetime(trade_date_df['trade_date'])
 
     def pre_start(self):
         self.logger.info('连接股票数据库')
         self.init_stock_database()
+
+        self.logger.info('获取交易日历')
+        self.get_trade_date()
 
     def start_forever(self):
         self.pre_start()
