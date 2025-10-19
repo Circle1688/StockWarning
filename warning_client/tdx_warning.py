@@ -31,7 +31,6 @@ class WarningClient(object):
     def __init__(self, stock_db: str, tdx_folder: str):
         self.stock_push = {}
         self.logger = setup_default_logger('WarningClient')
-        self.trade_date_df = None
         self.webhook = None
         self.keyword = None
         self.stock_db = stock_db
@@ -215,6 +214,7 @@ class WarningClient(object):
         elif period == "monthly":
             adjust = ''
 
+        # tqdm.write(f"更新股票 {symbol} 的最新{period}数据")
         stock_df = ak.stock_zh_a_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date, adjust=adjust)
 
         # 重命名列以匹配数据库
@@ -233,9 +233,6 @@ class WarningClient(object):
         # 写入数据库
         stock_df.to_sql(f"stock_{period}", conn, if_exists='append', index=False)
 
-        # self.logger.info(f"成功更新股票 {symbol} 的{period}数据: 新增 {len(stock_df)} 条记录")
-        tqdm.write(f"成功更新股票 {symbol} 的{period}数据: 新增 {len(stock_df)} 条记录")
-
         # 构建查询语句
         query = f"SELECT * FROM stock_{period} WHERE symbol = '{symbol}' ORDER BY date"
 
@@ -247,7 +244,7 @@ class WarningClient(object):
             df['date'] = pd.to_datetime(df['date'])
 
         # self.logger.info(f"成功获取股票 {symbol} 的{period}数据: 共 {len(df)} 条记录")
-        tqdm.write(f"成功获取股票 {symbol} 的{period}数据: 共 {len(df)} 条记录")
+        # tqdm.write(f"从数据库获取股票 {symbol} 的{period}数据: 共 {len(df)} 条记录")
 
         conn.close()
         return df
@@ -338,7 +335,6 @@ class WarningClient(object):
                 headers = {'Content-Type': 'application/json'}
                 resp = requests.post(url, json=body, headers=headers)
 
-                # self.logger.info(f'{title} {message}')
         except Exception as e:
             self.logger.error(e)
 
@@ -349,6 +345,8 @@ class WarningClient(object):
         # 多线程容易被封ip
         for stock in tqdm(stocks):
             title, push_content = self.stock_analysis(stock, at_close)
+
+            tqdm.write(f'{title} {push_content}')
 
             need_push = False
 
@@ -366,23 +364,17 @@ class WarningClient(object):
                 if push_content != "":
                     if at_close:
                         self.push(title, f"尾盘{push_content}")
-                        tqdm.write(f'{title} 尾盘{push_content}')
                     else:
                         self.push(title, push_content)
-                        tqdm.write(f'{title} {push_content}')
 
         if at_close:
             # 尾盘清空记录
             self.stock_push = {}
 
-        self.logger.info('已发送推送')
 
     def pre_start(self):
         self.logger.info('连接股票数据库')
         self.init_stock_database()
-        # 获取交易日历
-        self.trade_date_df = ak.tool_trade_date_hist_sina()
-        self.logger.info('获取交易日历')
 
     def start_forever(self):
         self.pre_start()
