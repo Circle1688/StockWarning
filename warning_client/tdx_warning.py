@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import requests
 from apscheduler.triggers.interval import IntervalTrigger
 from .log import setup_default_logger
+from tqdm import tqdm
 
 
 class StockSignal(object):
@@ -60,7 +61,6 @@ class WarningClient(object):
             cursor.execute(create_table_query)
             conn.commit()
         conn.close()
-        self.logger.info('初始化股票数据库')
 
     def load_stocks_tdx(self):
         # 读取通达信自选股文件
@@ -162,53 +162,6 @@ class WarningClient(object):
 
         return signal
 
-    def get_nearest_trading_date(self):
-        """
-        获取距离当前日期最近的交易日（不包含未来日期）
-        """
-        try:
-
-            # 确保日期列为datetime格式
-            self.trade_date_df['trade_date'] = pd.to_datetime(self.trade_date_df['trade_date'])
-
-            # 获取当前日期（不含时间部分）
-            current_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-            # 过滤掉未来日期，只保留今天及以前的日期
-            past_dates = self.trade_date_df[self.trade_date_df['trade_date'] <= current_date]
-
-            if past_dates.empty:
-                # 如果没有找到任何过去的交易日，尝试向前多获取一些数据
-                self.logger.info("未找到过去的交易日，尝试重新获取数据...")
-                return None
-
-            # 获取最近的交易日（即日期最大的那个）
-            nearest_trading_date = past_dates['trade_date'].max()
-
-            return nearest_trading_date.strftime('%Y%m%d')
-
-        except Exception as e:
-            self.logger.error(f"获取交易日历时出错: {e}")
-            return None
-
-    def is_same_week(self, date1, date2):
-        """
-        判断两个日期是否在同一周
-        """
-        # 获取ISO年份和周数
-        iso_year1, iso_week1, _ = date1.isocalendar()
-        iso_year2, iso_week2, _ = date2.isocalendar()
-
-        # 比较年份和周数
-        return (iso_year1 == iso_year2) and (iso_week1 == iso_week2)
-
-    def is_same_month(self, date1, date2):
-        """
-        判断两个日期是否在同一月
-        """
-        # 比较年份和月份
-        return (date1.year == date2.year) and (date1.month == date2.month)
-
     def get_stock_data(self, symbol, period):
         conn = self.create_stock_db_connection()
         cursor = conn.cursor()
@@ -217,47 +170,28 @@ class WarningClient(object):
         cursor.execute(f"SELECT MAX(date) FROM stock_{period} WHERE symbol = ?", (symbol,))
         latest_date = cursor.fetchone()[0]
 
-        # 设置日期范围
+        # 今天为最新日期
         end_date = datetime.now().strftime("%Y%m%d")
 
+        # 如果数据库中有一部分数据，就进行增量更新
         if latest_date:
-            # 增量更新：从最新日期的下一天开始
-            latest_date_dt = datetime.strptime(latest_date, "%Y-%m-%d")
-            # 从数据库最新的下一天开始
-            start_date = (latest_date_dt + timedelta(days=1)).strftime("%Y%m%d")
+            # 增量更新：记录数据库最新日期，然后移除最新一条数据，再从这个日期开始更新
+            start_date = datetime.strptime(latest_date, "%Y-%m-%d").strftime("%Y%m%d")
 
-            latest_date_str = datetime.strptime(latest_date, "%Y-%m-%d").strftime("%Y%m%d")
-
-            need_update = False
-            # 获取最近交易日
-            if period == "daily":
-                nearest_trade_date = self.get_nearest_trading_date()
-                if latest_date_str == nearest_trade_date:
-                    need_update = True
-
-            if period == "weekly":
-                need_update = self.is_same_week(latest_date_dt, datetime.now())
-
-            if period == "monthly":
-                need_update = self.is_same_month(latest_date_dt, datetime.now())
-
-            if need_update:
-                self.logger.info(f"更新股票 {symbol} 的{period}最新数据")
-                start_date = end_date
-                cursor.execute(f"""
-                                    DELETE FROM stock_{period}
+            # tqdm.write(f"移除股票 {symbol} 的{period}最新一条数据")
+            cursor.execute(f"""
+                                DELETE FROM stock_{period}
+                                WHERE symbol = ?
+                                AND date = (
+                                    SELECT MAX(date)
+                                    FROM stock_{period}
                                     WHERE symbol = ?
-                                    AND date = (
-                                        SELECT MAX(date)
-                                        FROM stock_{period}
-                                        WHERE symbol = ?
-                                    )
-                                """, (symbol, symbol))
-                conn.commit()
+                                )
+                            """, (symbol, symbol))
+            conn.commit()
 
         else:
-            # 全量下载：从1990年（A股市场起始年份）开始
-            # start_date = "19900101"
+            # 数据库没有数据，那么全量下载
             # 获取当前日期
             current_date = datetime.now().date()
 
@@ -281,8 +215,7 @@ class WarningClient(object):
         elif period == "monthly":
             adjust = ''
 
-        stock_df = ak.stock_zh_a_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date,
-                                      adjust=adjust)
+        stock_df = ak.stock_zh_a_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date, adjust=adjust)
 
         # 重命名列以匹配数据库
         stock_df = stock_df.rename(columns={
@@ -294,16 +227,14 @@ class WarningClient(object):
             "成交量": "volume"
         })
 
-        if stock_df.empty:
-            self.logger.info(f"未获取到股票 {symbol} 的新数据")
-        else:
-            # 选择需要的列
-            stock_df = stock_df[['symbol', 'date', 'high', 'low', 'close', 'volume']]
+        # 选择需要的列
+        stock_df = stock_df[['symbol', 'date', 'high', 'low', 'close', 'volume']]
 
-            # 写入数据库
-            stock_df.to_sql(f"stock_{period}", conn, if_exists='append', index=False)
+        # 写入数据库
+        stock_df.to_sql(f"stock_{period}", conn, if_exists='append', index=False)
 
-            self.logger.info(f"成功更新股票 {symbol} 的{period}数据: 新增 {len(stock_df)} 条记录")
+        # self.logger.info(f"成功更新股票 {symbol} 的{period}数据: 新增 {len(stock_df)} 条记录")
+        tqdm.write(f"成功更新股票 {symbol} 的{period}数据: 新增 {len(stock_df)} 条记录")
 
         # 构建查询语句
         query = f"SELECT * FROM stock_{period} WHERE symbol = '{symbol}' ORDER BY date"
@@ -315,7 +246,8 @@ class WarningClient(object):
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'])
 
-        self.logger.info(f"成功获取股票 {symbol} 的{period}数据: 共 {len(df)} 条记录")
+        # self.logger.info(f"成功获取股票 {symbol} 的{period}数据: 共 {len(df)} 条记录")
+        tqdm.write(f"成功获取股票 {symbol} 的{period}数据: 共 {len(df)} 条记录")
 
         conn.close()
         return df
@@ -393,27 +325,29 @@ class WarningClient(object):
     def push(self, title, message):
         try:
             url = self.webhook
-            body = {
-                "at": {
-                    "isAtAll": True
-                },
-                "text": {
-                    "content": f'{self.keyword} {title}\n{message}'
-                },
-                "msgtype": "text"
-            }
-            headers = {'Content-Type': 'application/json'}
-            resp = requests.post(url, json=body, headers=headers)
+            if url:
+                body = {
+                    "at": {
+                        "isAtAll": True
+                    },
+                    "text": {
+                        "content": f'{self.keyword} {title}\n{message}'
+                    },
+                    "msgtype": "text"
+                }
+                headers = {'Content-Type': 'application/json'}
+                resp = requests.post(url, json=body, headers=headers)
 
-            self.logger.info('已发送通知')
+                # self.logger.info(f'{title} {message}')
         except Exception as e:
             self.logger.error(e)
 
     def stock_warning(self, at_close=False):
         stocks = self.load_stocks_tdx()
 
+        self.logger.info('分析通达信自选股')
         # 多线程容易被封ip
-        for stock in stocks:
+        for stock in tqdm(stocks):
             title, push_content = self.stock_analysis(stock, at_close)
 
             need_push = False
@@ -432,14 +366,19 @@ class WarningClient(object):
                 if push_content != "":
                     if at_close:
                         self.push(title, f"尾盘{push_content}")
+                        tqdm.write(f'{title} 尾盘{push_content}')
                     else:
-                        # print(title, push_content)
                         self.push(title, push_content)
+                        tqdm.write(f'{title} {push_content}')
+
         if at_close:
             # 尾盘清空记录
             self.stock_push = {}
 
+        self.logger.info('已发送推送')
+
     def pre_start(self):
+        self.logger.info('连接股票数据库')
         self.init_stock_database()
         # 获取交易日历
         self.trade_date_df = ak.tool_trade_date_hist_sina()
@@ -460,7 +399,7 @@ class WarningClient(object):
         # 尾盘检查
         scheduler.add_job(self.stock_warning, args=[True], trigger='cron', day_of_week='mon-fri', hour=14, minute='50')
 
-        # scheduler.add_job(self.stock_warning, args=[False], trigger=IntervalTrigger(minutes=1), next_run_time=datetime.now())
+        scheduler.add_job(self.stock_warning, args=[False], trigger=IntervalTrigger(minutes=1), next_run_time=datetime.now())
 
         try:
             # 启动调度器
