@@ -62,8 +62,9 @@ class WarningClient(object):
             conn.commit()
         conn.close()
 
-    def is_trade_day(self, date):
-        return date in self.trade_date_df.values
+    def is_trade_day(self):
+        today = np.datetime64('today')
+        return today in self.trade_date_df.values
 
     def load_stocks_tdx(self):
         # 读取通达信自选股文件
@@ -343,10 +344,8 @@ class WarningClient(object):
             self.logger.error(e)
 
     def stock_warning(self, at_close=False):
-        current_date = datetime.now()
-
         # 非交易日不运行
-        if not self.is_trade_day(current_date):
+        if not self.is_trade_day():
             self.logger.info('今日休息')
             return
 
